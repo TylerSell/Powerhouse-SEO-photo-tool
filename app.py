@@ -67,10 +67,27 @@ if check_password():
     
     # --- LOCATIONS ---
     PRESET_LOCATIONS = {
-        "Headquarters (Default)": (38.9517, -92.3341),
-        "North Side": (38.9800, -92.3000),
-        "South Side": (38.9000, -92.3500),
-        "West End": (38.9300, -92.4000),
+        "Wentzville (Default)": (38.8126, -90.8554),
+        "O'Fallon, MO": (38.8106, -90.6998),
+        "Chesterfield, MO": (38.6631, -90.5771),
+        "St. Charles, MO": (38.7881, -90.4882),
+        "Town and Country, MO": (38.6465, -90.4548),
+        "Lake St. Louis, MO": (38.7909, -90.7854),
+        "Wildwood, MO": (38.5828, -90.6629),
+        "St. Peters, MO": (38.7998, -90.6265),
+        "Ballwin, MO": (38.5937, -90.5476),
+        "Cottleville, MO": (38.7467, -90.6479),
+        "Dardenne Prairie, MO": (38.7928, -90.7282),
+        "Ellisville, MO": (38.5931, -90.5901),
+        "Manchester, MO": (38.5912, -90.5054),
+        "Des Peres, MO": (38.6012, -90.4287),
+        "Weldon Spring, MO": (38.7126, -90.6865),
+        "Clarkson Valley, MO": (38.6384, -90.6054),
+        "Troy, MO": (38.9792, -90.9807),
+        "Warrenton, MO": (38.8131, -91.1399),
+        "Foristell, MO": (38.8170, -90.9387),
+        "St. Charles County, MO": (38.7842, -90.6798),
+        "Columbia, MO": (38.9517, -92.3341),
     }
 
     def to_deg(value, loc):
