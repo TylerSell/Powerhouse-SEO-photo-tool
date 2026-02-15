@@ -18,6 +18,12 @@ SCOPES = ['https://www.googleapis.com/auth/drive.file']
 
 def upload_to_drive(zip_bytes, filename, folder_id):
     """Uploads the ZIP file to the specified Google Drive folder."""
+    
+    # 1. Safety Check: Is the folder_id actually there?
+    if not folder_id or folder_id == "":
+        st.error("❌ Error: Google Drive Folder ID is missing. Check your secrets file.")
+        return None
+
     try:
         # Load credentials from secrets
         creds_dict = st.secrets["gcp_service_account"]
@@ -26,13 +32,15 @@ def upload_to_drive(zip_bytes, filename, folder_id):
         )
         service = build('drive', 'v3', credentials=creds)
 
+        # 2. explicit metadata with parents
         file_metadata = {
             'name': filename,
-            'parents': [folder_id]
+            'parents': [folder_id]  # This forces it into YOUR folder
         }
         
         media = MediaIoBaseUpload(io.BytesIO(zip_bytes), mimetype='application/zip')
         
+        # 3. Create the file
         file = service.files().create(
             body=file_metadata,
             media_body=media,
@@ -40,8 +48,10 @@ def upload_to_drive(zip_bytes, filename, folder_id):
         ).execute()
         
         return file.get('id')
+
     except Exception as e:
-        st.error(f"Google Drive Error: {e}")
+        # If it fails, print the exact error to the screen
+        st.error(f"Google Drive Upload Failed: {e}")
         return None
 
 # --- PASSWORD AUTHENTICATION ---
