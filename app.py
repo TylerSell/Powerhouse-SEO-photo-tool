@@ -8,14 +8,48 @@ import zipfile
 import tempfile
 import os
 from datetime import datetime, timedelta
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
+
+# --- GOOGLE DRIVE CONFIGURATION ---
+# We will load these from Streamlit Secrets later
+SCOPES = ['https://www.googleapis.com/auth/drive.file']
+
+def upload_to_drive(zip_bytes, filename, folder_id):
+    """Uploads the ZIP file to the specified Google Drive folder."""
+    try:
+        # Load credentials from secrets
+        creds_dict = st.secrets["gcp_service_account"]
+        creds = service_account.Credentials.from_service_account_info(
+            creds_dict, scopes=SCOPES
+        )
+        service = build('drive', 'v3', credentials=creds)
+
+        file_metadata = {
+            'name': filename,
+            'parents': [folder_id]
+        }
+        
+        media = MediaIoBaseUpload(io.BytesIO(zip_bytes), mimetype='application/zip')
+        
+        file = service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields='id'
+        ).execute()
+        
+        return file.get('id')
+    except Exception as e:
+        st.error(f"Google Drive Error: {e}")
+        return None
 
 # --- PASSWORD AUTHENTICATION ---
 def check_password():
-    """Returns `True` if the user had the correct password."""
     def password_entered():
         if st.session_state["password"] == st.secrets["password"]:
             st.session_state["password_correct"] = True
-            del st.session_state["password"]  # don't store password
+            del st.session_state["password"]
         else:
             st.session_state["password_correct"] = False
 
@@ -30,31 +64,13 @@ def check_password():
         return True
 
 if check_password():
-    # --- YOUR APP STARTS HERE ---
     
-    # --- CONFIGURATION: EDIT YOUR LOCATIONS HERE ---
+    # --- LOCATIONS ---
     PRESET_LOCATIONS = {
-        "Wentzville (Default)": (38.8126, -90.8554),
-        "O'Fallon, MO": (38.8106, -90.6998),
-        "Chesterfield, MO": (38.6631, -90.5771),
-        "St. Charles, MO": (38.7881, -90.4882),
-        "Town and Country, MO": (38.6465, -90.4548),
-        "Lake St. Louis, MO": (38.7909, -90.7854),
-        "Wildwood, MO": (38.5828, -90.6629),
-        "St. Peters, MO": (38.7998, -90.6265),
-        "Ballwin, MO": (38.5937, -90.5476),
-        "Cottleville, MO": (38.7467, -90.6479),
-        "Dardenne Prairie, MO": (38.7928, -90.7282),
-        "Ellisville, MO": (38.5931, -90.5901),
-        "Manchester, MO": (38.5912, -90.5054),
-        "Des Peres, MO": (38.6012, -90.4287),
-        "Weldon Spring, MO": (38.7126, -90.6865),
-        "Clarkson Valley, MO": (38.6384, -90.6054),
-        "Troy, MO": (38.9792, -90.9807),
-        "Warrenton, MO": (38.8131, -91.1399),
-        "Foristell, MO": (38.8170, -90.9387),
-        "St. Charles County, MO": (38.7842, -90.6798),
-        "Columbia, MO": (38.9517, -92.3341),
+        "Headquarters (Default)": (38.9517, -92.3341),
+        "North Side": (38.9800, -92.3000),
+        "South Side": (38.9000, -92.3500),
+        "West End": (38.9300, -92.4000),
     }
 
     def to_deg(value, loc):
@@ -98,6 +114,15 @@ if check_password():
         st.divider()
         seo_filename = st.text_input("SEO Filename (Keywords)", value="house-washing-service")
         st.divider()
+        
+        # --- NEW: GOOGLE DRIVE OPTION ---
+        st.subheader("Cloud Backup")
+        use_drive = st.checkbox("Upload to Google Drive")
+        # You can hardcode this ID here or put it in secrets. 
+        # For simplicity, we will assume you put it in secrets, or paste it here.
+        drive_folder_id = st.secrets["drive_folder_id"] 
+        
+        st.divider()
         location_mode = st.radio("Location Method:", ["Select from Preset", "Enter Manually"])
         if location_mode == "Select from Preset":
             selected_loc_name = st.selectbox("Area", list(PRESET_LOCATIONS.keys()))
@@ -105,23 +130,22 @@ if check_password():
         else:
             lat_input = st.number_input("Lat", value=38.9517, format="%.6f")
             lng_input = st.number_input("Lng", value=-92.3341, format="%.6f")
-        st.divider()
+        
         date_input = st.date_input("Date", datetime.now())
         time_input = st.time_input("Start Time", datetime.now())
 
     with col2:
         st.header("2. Process")
         if uploaded_video is not None:
-            # Create a temp file
             tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
             tfile.write(uploaded_video.read())
-            tfile.close() # Close so OpenCV can open it
+            tfile.close()
             
             cap = cv2.VideoCapture(tfile.name)
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             
             if total_frames > 0:
-                if st.button("Generate Images", type="primary"):
+                if st.button("Generate & Process", type="primary"):
                     frame_indices = np.linspace(0, total_frames - 1, 10, dtype=int)
                     processed_images = []
                     progress_bar = st.progress(0)
@@ -136,11 +160,9 @@ if check_password():
                             img_byte_arr = io.BytesIO()
                             pil_img.save(img_byte_arr, format='JPEG', quality=95)
                             
-                            # Time & Metadata
                             current_photo_time = base_dt + timedelta(minutes=i*5)
                             final_bytes = set_image_metadata(img_byte_arr.getvalue(), lat_input, lng_input, current_photo_time)
                             
-                            # Naming
                             if i == 0: suffix = "before"
                             elif i == 9: suffix = "after"
                             else: suffix = f"action-{i}"
@@ -149,28 +171,29 @@ if check_password():
                             processed_images.append((filename, final_bytes))
                         progress_bar.progress((i + 1) / 10)
                     
-                    # Preview
-                    c1, c2, c3 = st.columns(3)
-                    if len(processed_images) > 9:
-                        c1.image(processed_images[0][1], caption="Before")
-                        c2.image(processed_images[5][1], caption="Action")
-                        c3.image(processed_images[9][1], caption="After")
-                    
                     # Zip
                     zip_buffer = io.BytesIO()
                     with zipfile.ZipFile(zip_buffer, "w") as zf:
                         for fname, data in processed_images:
                             zf.writestr(fname, data)
                     
+                    zip_name = f"{seo_filename}-photos.zip"
+                    
+                    # --- DRIVE UPLOAD ---
+                    if use_drive:
+                        with st.spinner("Uploading to Google Drive..."):
+                            file_id = upload_to_drive(zip_buffer.getvalue(), zip_name, drive_folder_id)
+                            if file_id:
+                                st.success(f"✅ Uploaded to Drive! (ID: {file_id})")
+                    
                     st.download_button(
                         label="Download Photos (ZIP)",
                         data=zip_buffer.getvalue(),
-                        file_name=f"{seo_filename}-photos.zip",
+                        file_name=zip_name,
                         mime="application/zip",
                         type="primary"
                     )
             cap.release()
-            # Clean up temp file immediately
             try:
                 os.unlink(tfile.name)
             except:
