@@ -1,17 +1,15 @@
 import streamlit as st
-import cv2
-import numpy as np
-from PIL import Image
 import piexif
+from PIL import Image
 import io
-import zipfile
-import tempfile
-import os
-from datetime import datetime, timedelta, time
+import random
+from datetime import datetime, timedelta
 
-# --- CONFIGURATION ---
+# --- CONSTANTS ---
+
+# Your specific locations list
 PRESET_LOCATIONS = {
-    "Wentzville (Default)": (38.8126, -90.8554),
+    "Wentzville, MO": (38.8126, -90.8554),
     "O'Fallon, MO": (38.8106, -90.6998),
     "Chesterfield, MO": (38.6631, -90.5771),
     "St. Charles, MO": (38.7881, -90.4882),
@@ -30,17 +28,29 @@ PRESET_LOCATIONS = {
     "Troy, MO": (38.9792, -90.9807),
     "Warrenton, MO": (38.8131, -91.1399),
     "Foristell, MO": (38.8170, -90.9387),
-    "St. Charles County, MO": (38.7842, -90.6798),
-    "Columbia, MO": (38.9517, -92.3341),
 }
 
-# --- PASSWORD AUTHENTICATION ---
+# Your specific services list
+SERVICES_LIST = [
+    "House Wash",
+    "Gutter Cleaning",
+    "Window Cleaning",
+    "Fence Cleaning",
+    "Deck Cleaning",
+    "Concrete Cleaning",
+    "Concrete Sealing"
+]
+
+# --- PAGE CONFIG ---
+st.set_page_config(page_title="SEO Photo Batcher", layout="wide")
+
+# --- AUTHENTICATION ---
 def check_password():
     """Returns `True` if the user had the correct password."""
     def password_entered():
         if st.session_state["password"] == st.secrets["password"]:
             st.session_state["password_correct"] = True
-            del st.session_state["password"]  # don't store password
+            del st.session_state["password"]
         else:
             st.session_state["password_correct"] = False
 
@@ -54,168 +64,170 @@ def check_password():
     else:
         return True
 
+if not check_password():
+    st.stop()
+
 # --- HELPER FUNCTIONS ---
-def to_deg(value, loc):
-    if value < 0: loc_value = loc[1]
-    else: loc_value = loc[0]
-    abs_value = abs(value)
-    deg = int(abs_value)
-    t1 = (abs_value - deg) * 60
-    min = int(t1)
-    sec = round((t1 - min) * 60, 10000)
-    return (deg, 1), (min, 1), (int(sec * 10000), 10000), loc_value
 
-def set_image_metadata(image_bytes, lat, lng, date_time):
-    exif_dict = {"0th": {}, "Exif": {}, "GPS": {}, "1st": {}, "thumbnail": None}
-    if date_time:
-        dt_str = date_time.strftime("%Y:%m:%d %H:%M:%S")
-        exif_dict["0th"][piexif.ImageIFD.DateTime] = dt_str
-        exif_dict["Exif"][piexif.ExifIFD.DateTimeOriginal] = dt_str
-        exif_dict["Exif"][piexif.ExifIFD.DateTimeDigitized] = dt_str
-    if lat is not None and lng is not None:
-        lat_deg = to_deg(lat, ["N", "S"])
-        lng_deg = to_deg(lng, ["E", "W"])
-        exif_dict["GPS"][piexif.GPSIFD.GPSLatitudeRef] = lat_deg[3]
-        exif_dict["GPS"][piexif.GPSIFD.GPSLatitude] = lat_deg[0:3]
-        exif_dict["GPS"][piexif.GPSIFD.GPSLongitudeRef] = lng_deg[3]
-        exif_dict["GPS"][piexif.GPSIFD.GPSLongitude] = lng_deg[0:3]
-    exif_bytes = piexif.dump(exif_dict)
+def get_random_date(start, end):
+    """Generate a random datetime between start and end (8AM - 6PM)."""
+    delta = end - start
+    int_delta = (delta.days * 24 * 60 * 60) + delta.seconds
+    random_second = random.randrange(int_delta)
+    res = start + timedelta(seconds=random_second)
+    return res.replace(hour=random.randint(8, 18), minute=random.randint(0, 59))
+
+def dec_to_dms(deg):
+    """Convert decimal degrees to DMS format for EXIF."""
+    d = int(deg)
+    m = int((deg - d) * 60)
+    s = (deg - d - m/60) * 3600 * 100
+    return ((d, 1), (m, 1), (int(s), 100))
+
+def process_single_image(image_bytes, service_name, location_data, date_obj):
     img = Image.open(io.BytesIO(image_bytes))
-    out_bytes = io.BytesIO()
-    img.save(out_bytes, format="JPEG", exif=exif_bytes)
-    return out_bytes.getvalue()
+    
+    # 1. Prepare EXIF Data
+    exif_dict = {"0th": {}, "Exif": {}, "GPS": {}, "1st": {}, "thumbnail": None}
+    datestr = date_obj.strftime("%Y:%m:%d %H:%M:%S")
+    exif_dict["0th"][piexif.ImageIFD.DateTime] = datestr
+    exif_dict["Exif"][piexif.ExifIFD.DateTimeOriginal] = datestr
+    exif_dict["Exif"][piexif.ExifIFD.DateTimeDigitized] = datestr
 
-def remove_image(index):
-    if 0 <= index < len(st.session_state.generated_images):
-        del st.session_state.generated_images[index]
+    if location_data and location_data.get('lat'):
+        lat = location_data['lat']
+        lng = location_data['lng']
+        exif_dict["GPS"][piexif.GPSIFD.GPSLatitudeRef] = 'N' if lat >= 0 else 'S'
+        exif_dict["GPS"][piexif.GPSIFD.GPSLatitude] = dec_to_dms(abs(lat))
+        exif_dict["GPS"][piexif.GPSIFD.GPSLongitudeRef] = 'E' if lng >= 0 else 'W'
+        exif_dict["GPS"][piexif.GPSIFD.GPSLongitude] = dec_to_dms(abs(lng))
 
-# --- MAIN APP ---
-if check_password():
-    st.set_page_config(page_title="Video-to-SEO Photos", layout="wide")
-    st.title("🏠 Job Site Video-to-Photo Tool")
+    try:
+        exif_bytes = piexif.dump(exif_dict)
+    except Exception as e:
+        exif_bytes = None
 
-    if 'generated_images' not in st.session_state:
-        st.session_state.generated_images = []
-
-    # --- SETTINGS SECTION ---
-    with st.expander("🛠️ Job Settings", expanded=True):
-        col1, col2 = st.columns(2)
+    # 2. Save Image
+    output = io.BytesIO()
+    if img.mode in ("RGBA", "P"):
+        img = img.convert("RGB")
         
-        # LEFT COLUMN
-        with col1:
-            uploaded_video = st.file_uploader("1. Upload Video", type=['mp4', 'mov', 'avi'])
-            seo_filename = st.text_input("2. SEO Keywords (Filename)", value="house-washing-service")
-            
-            # --- CUSTOM 12-HOUR TIME PICKER ---
-            st.markdown("**Job Start Time**")
-            t_c1, t_c2, t_c3 = st.columns(3)
-            with t_c1:
-                hour = st.selectbox("Hour", range(1, 13), index=8) # Default 9 AM
-            with t_c2:
-                minute = st.selectbox("Min", ["00", "05", "10", "15", "20", "25", "30", "35", "40", "45", "50", "55"])
-            with t_c3:
-                ampm = st.selectbox("AM/PM", ["AM", "PM"], index=0)
-            
-            # Convert 12h to 24h for Logic
-            hour_24 = hour
-            if ampm == "PM" and hour != 12:
-                hour_24 += 12
-            elif ampm == "AM" and hour == 12:
-                hour_24 = 0
-            
-            # Create the time object
-            time_input = time(hour_24, int(minute))
-        
-        # RIGHT COLUMN
-        with col2:
-            loc_mode = st.radio("Location:", ["Preset", "Manual"], horizontal=True)
-            if loc_mode == "Preset":
-                sel_loc = st.selectbox("Select Area", list(PRESET_LOCATIONS.keys()))
-                lat_input, lng_input = PRESET_LOCATIONS[sel_loc]
-            else:
-                c_a, c_b = st.columns(2)
-                lat_input = c_a.number_input("Lat", value=38.8126, format="%.6f")
-                lng_input = c_b.number_input("Lng", value=-90.8554, format="%.6f")
-            
-            date_input = st.date_input("Date", datetime.now())
+    if exif_bytes:
+        img.save(output, format="JPEG", exif=exif_bytes, quality=95)
+    else:
+        img.save(output, format="JPEG", quality=95)
+    
+    # 3. Create Clean Filename
+    safe_service = "".join([c if c.isalnum() else "-" for c in service_name])
+    safe_loc = "".join([c if c.isalnum() else "-" for c in location_data['name']])
+    safe_date = date_obj.strftime("%m-%d-%Y")
+    
+    while "--" in safe_service: safe_service = safe_service.replace("--", "-")
+    while "--" in safe_loc: safe_loc = safe_loc.replace("--", "-")
+    
+    new_filename = f"{safe_service}-{safe_loc}-{safe_date}.jpg"
+    
+    return new_filename, output.getvalue()
 
-    # --- PROCESS BUTTON ---
-    if uploaded_video is not None:
-        if st.button("🚀 Process Video & Generate Previews", type="primary"):
-            st.session_state.generated_images = []
+# --- MAIN APP UI ---
+
+st.title("📸 Private SEO Photo Optimizer")
+st.markdown("Mobile-friendly mode: Upload, edit, and download individually.")
+
+# Sidebar Configuration
+with st.sidebar:
+    st.header("⚙️ Configuration")
+    
+    col1, col2 = st.columns(2)
+    start_date = col1.date_input("Start Date", datetime.now() - timedelta(days=7))
+    end_date = col2.date_input("End Date", datetime.now())
+    
+    # DEFAULT SERVICE SELECTION
+    default_service = st.selectbox("Default Service", SERVICES_LIST)
+    
+    # DISPLAY LOADED LOCATIONS
+    st.info(f"Loaded {len(PRESET_LOCATIONS)} Missouri Locations.")
+    with st.expander("View Location List"):
+        st.write(list(PRESET_LOCATIONS.keys()))
+
+# File Uploader
+uploaded_files = st.file_uploader("Upload Photos", accept_multiple_files=True, type=['jpg','jpeg','png'])
+
+if "assignments" not in st.session_state:
+    st.session_state.assignments = {}
+
+if uploaded_files:
+    st.divider()
+    
+    # Convert PRESET_LOCATIONS dict to list format for random choice
+    location_list = [{"name": k, "lat": v[0], "lng": v[1]} for k, v in PRESET_LOCATIONS.items()]
+    
+    for uploaded_file in uploaded_files:
+        file_key = f"{uploaded_file.name}_{uploaded_file.size}"
+        
+        # Assign random data only if not already assigned
+        if file_key not in st.session_state.assignments:
+            rand_date = get_random_date(
+                datetime.combine(start_date, datetime.min.time()),
+                datetime.combine(end_date, datetime.min.time())
+            )
+            rand_loc = random.choice(location_list)
             
-            with st.spinner("Extracting frames..."):
-                tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
-                tfile.write(uploaded_video.read())
-                tfile.close()
+            st.session_state.assignments[file_key] = {
+                "date": rand_date,
+                "loc": rand_loc,
+                "service": default_service
+            }
+
+    # Display Gallery
+    for i, uploaded_file in enumerate(uploaded_files):
+        file_key = f"{uploaded_file.name}_{uploaded_file.size}"
+        data = st.session_state.assignments.get(file_key)
+        
+        if data:
+            with st.container():
+                st.markdown(f"#### Photo {i+1}")
+                c1, c2 = st.columns([1, 2])
                 
-                cap = cv2.VideoCapture(tfile.name)
-                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                with c1:
+                    st.image(uploaded_file, use_container_width=True)
                 
-                if total_frames > 0:
-                    frame_indices = np.linspace(0, total_frames - 1, 10, dtype=int)
-                    base_dt = datetime.combine(date_input, time_input)
+                with c2:
+                    # SERVICE DROPDOWN (Specific to this photo)
+                    new_service = st.selectbox(
+                        "Service Type", 
+                        SERVICES_LIST, 
+                        index=SERVICES_LIST.index(data['service']) if data['service'] in SERVICES_LIST else 0,
+                        key=f"svc_{file_key}"
+                    )
                     
-                    for i, idx in enumerate(frame_indices):
-                        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-                        ret, frame = cap.read()
-                        if ret:
-                            # Process Image
-                            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                            pil_img = Image.fromarray(rgb_frame)
-                            img_byte_arr = io.BytesIO()
-                            pil_img.save(img_byte_arr, format='JPEG', quality=95)
-                            
-                            # Add time drift (5 mins per photo)
-                            current_photo_time = base_dt + timedelta(minutes=i*5)
-                            
-                            # Inject Metadata
-                            final_bytes = set_image_metadata(img_byte_arr.getvalue(), lat_input, lng_input, current_photo_time)
-                            
-                            # Naming
-                            if i == 0: suffix = "before"
-                            elif i == 9: suffix = "after"
-                            else: suffix = f"action-{i}"
-                            filename = f"{seo_filename.replace(' ', '-').lower()}-{i+1:02d}-{suffix}.jpg"
-                            
-                            st.session_state.generated_images.append({
-                                "name": filename,
-                                "data": final_bytes,
-                                "preview": pil_img,
-                                "key": f"img_{i}_{int(datetime.now().timestamp())}" # Unique key for buttons
-                            })
+                    # Update session state if changed
+                    if new_service != data['service']:
+                        st.session_state.assignments[file_key]['service'] = new_service
+                        st.rerun()
+
+                    # Info display
+                    st.caption(f"📍 **{data['loc']['name']}**")
+                    st.caption(f"📅 **{data['date'].strftime('%m-%d-%Y')}**")
+
+                    # Process Image
+                    final_name, final_bytes = process_single_image(
+                        uploaded_file.getvalue(),
+                        new_service,
+                        data['loc'],
+                        data['date']
+                    )
                     
-                cap.release()
-                os.unlink(tfile.name)
-            st.rerun()
+                    st.markdown(f"**Filename:** `{final_name}`")
 
-    # --- REVIEW GALLERY ---
-    if len(st.session_state.generated_images) > 0:
-        st.divider()
-        st.subheader(f"📸 Review Photos ({len(st.session_state.generated_images)} remaining)")
-        
-        # Grid Layout
-        cols = st.columns(3)
-        for i, img_obj in enumerate(st.session_state.generated_images):
-            col = cols[i % 3]
-            with col:
-                st.image(img_obj["preview"], caption=img_obj["name"], width='stretch')
-                if st.button(f"🗑️ Discard", key=img_obj["key"]):
-                    remove_image(i)
-                    st.rerun()
-
-        st.divider()
-
-        # --- FINAL DOWNLOAD ---
-        zip_buffer = io.BytesIO()
-        with zipfile.ZipFile(zip_buffer, "w") as zf:
-            for img_obj in st.session_state.generated_images:
-                zf.writestr(img_obj["name"], img_obj["data"])
-        
-        st.download_button(
-            label=f"📥 Download {len(st.session_state.generated_images)} Photos (ZIP)",
-            data=zip_buffer.getvalue(),
-            file_name=f"{seo_filename}-final-set.zip",
-            mime="application/zip",
-            type="primary"
-        )
+                    # DOWNLOAD BUTTON
+                    st.download_button(
+                        label="⬇️ Download This Image",
+                        data=final_bytes,
+                        file_name=final_name,
+                        mime="image/jpeg",
+                        key=f"btn_{file_key}",
+                        use_container_width=True
+                    )
+                
+                st.divider()
