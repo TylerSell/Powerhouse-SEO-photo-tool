@@ -7,7 +7,6 @@ from datetime import datetime, timedelta
 
 # --- CONSTANTS ---
 
-# Your specific locations list
 PRESET_LOCATIONS = {
     "Wentzville, MO": (38.8126, -90.8554),
     "O'Fallon, MO": (38.8106, -90.6998),
@@ -30,15 +29,13 @@ PRESET_LOCATIONS = {
     "Foristell, MO": (38.8170, -90.9387),
 }
 
-# Your specific services list
 SERVICES_LIST = [
     "House Wash",
     "Gutter Cleaning",
     "Window Cleaning",
     "Fence Cleaning",
     "Deck Cleaning",
-    "Concrete Cleaning",
-    "Concrete Sealing"
+    "Concrete Cleaning"
 ]
 
 # --- PAGE CONFIG ---
@@ -46,7 +43,6 @@ st.set_page_config(page_title="SEO Photo Batcher", layout="wide")
 
 # --- AUTHENTICATION ---
 def check_password():
-    """Returns `True` if the user had the correct password."""
     def password_entered():
         if st.session_state["password"] == st.secrets["password"]:
             st.session_state["password_correct"] = True
@@ -69,13 +65,18 @@ if not check_password():
 
 # --- HELPER FUNCTIONS ---
 
-def get_random_date(start, end):
-    """Generate a random datetime between start and end (8AM - 6PM)."""
-    delta = end - start
-    int_delta = (delta.days * 24 * 60 * 60) + delta.seconds
-    random_second = random.randrange(int_delta)
-    res = start + timedelta(seconds=random_second)
-    return res.replace(hour=random.randint(8, 18), minute=random.randint(0, 59))
+def get_random_weekday_date(start, end):
+    """Generate a random datetime between start and end, excluding Weekends."""
+    while True:
+        delta = end - start
+        int_delta = (delta.days * 24 * 60 * 60) + delta.seconds
+        random_second = random.randrange(int_delta)
+        res = start + timedelta(seconds=random_second)
+        
+        # weekday(): 0=Mon, 4=Fri, 5=Sat, 6=Sun
+        if res.weekday() < 5:
+            # Force business hours (8 AM to 6 PM)
+            return res.replace(hour=random.randint(8, 18), minute=random.randint(0, 59))
 
 def dec_to_dms(deg):
     """Convert decimal degrees to DMS format for EXIF."""
@@ -83,6 +84,60 @@ def dec_to_dms(deg):
     m = int((deg - d) * 60)
     s = (deg - d - m/60) * 3600 * 100
     return ((d, 1), (m, 1), (int(s), 100))
+
+def dms_to_dec(dms_ref, dms_list):
+    """Helper to convert EXIF DMS to decimal for comparison."""
+    if not dms_list: return 0.0
+    d = dms_list[0][0] / dms_list[0][1]
+    m = dms_list[1][0] / dms_list[1][1]
+    s = dms_list[2][0] / dms_list[2][1]
+    decimal = d + (m / 60.0) + (s / 3600.0)
+    if dms_ref in ['S', 'W']:
+        decimal = -decimal
+    return round(decimal, 4) # Round to 4 decimals for loose grouping
+
+def get_original_group_key(image_bytes):
+    """
+    Extracts original Date and GPS to form a 'Group Key'.
+    Photos with the same Key will get the same random assignment.
+    """
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        if 'exif' not in img.info:
+            return None # No EXIF, treat as unique
+        
+        exif_dict = piexif.load(img.info['exif'])
+        
+        # 1. Get Date (YYYY:MM:DD)
+        date_str = exif_dict.get("Exif", {}).get(piexif.ExifIFD.DateTimeOriginal)
+        if date_str:
+            date_str = date_str.decode('utf-8').split(' ')[0] # Just the date part
+        else:
+            date_str = "NoDate"
+
+        # 2. Get GPS
+        gps = exif_dict.get("GPS", {})
+        lat = 0.0
+        lng = 0.0
+        
+        if piexif.GPSIFD.GPSLatitude in gps and piexif.GPSIFD.GPSLongitude in gps:
+            lat = dms_to_dec(
+                gps.get(piexif.GPSIFD.GPSLatitudeRef, b'N').decode(),
+                gps.get(piexif.GPSIFD.GPSLatitude)
+            )
+            lng = dms_to_dec(
+                gps.get(piexif.GPSIFD.GPSLongitudeRef, b'E').decode(),
+                gps.get(piexif.GPSIFD.GPSLongitude)
+            )
+        
+        # If no GPS and no Date, return None (Unique)
+        if date_str == "NoDate" and lat == 0.0:
+            return None
+            
+        return f"{date_str}_{lat}_{lng}"
+        
+    except Exception:
+        return None
 
 def process_single_image(image_bytes, service_name, location_data, date_obj):
     img = Image.open(io.BytesIO(image_bytes))
@@ -104,7 +159,7 @@ def process_single_image(image_bytes, service_name, location_data, date_obj):
 
     try:
         exif_bytes = piexif.dump(exif_dict)
-    except Exception as e:
+    except Exception:
         exif_bytes = None
 
     # 2. Save Image
@@ -132,7 +187,7 @@ def process_single_image(image_bytes, service_name, location_data, date_obj):
 # --- MAIN APP UI ---
 
 st.title("📸 Private SEO Photo Optimizer")
-st.markdown("Mobile-friendly mode: Upload, edit, and download individually.")
+st.markdown("Features: Batch Processing, Group by Origin, Weekdays Only.")
 
 # Sidebar Configuration
 with st.sidebar:
@@ -142,40 +197,61 @@ with st.sidebar:
     start_date = col1.date_input("Start Date", datetime.now() - timedelta(days=7))
     end_date = col2.date_input("End Date", datetime.now())
     
-    # DEFAULT SERVICE SELECTION
     default_service = st.selectbox("Default Service", SERVICES_LIST)
     
-    # DISPLAY LOADED LOCATIONS
     st.info(f"Loaded {len(PRESET_LOCATIONS)} Missouri Locations.")
-    with st.expander("View Location List"):
-        st.write(list(PRESET_LOCATIONS.keys()))
 
 # File Uploader
 uploaded_files = st.file_uploader("Upload Photos", accept_multiple_files=True, type=['jpg','jpeg','png'])
 
+# Session State for assignments
 if "assignments" not in st.session_state:
-    st.session_state.assignments = {}
+    st.session_state.assignments = {} # Key: filename -> data
+if "group_cache" not in st.session_state:
+    st.session_state.group_cache = {} # Key: origin_group_key -> {date, loc}
 
 if uploaded_files:
     st.divider()
     
-    # Convert PRESET_LOCATIONS dict to list format for random choice
     location_list = [{"name": k, "lat": v[0], "lng": v[1]} for k, v in PRESET_LOCATIONS.items()]
     
     for uploaded_file in uploaded_files:
         file_key = f"{uploaded_file.name}_{uploaded_file.size}"
         
-        # Assign random data only if not already assigned
+        # Only process if we haven't assigned this specific file yet
         if file_key not in st.session_state.assignments:
-            rand_date = get_random_date(
-                datetime.combine(start_date, datetime.min.time()),
-                datetime.combine(end_date, datetime.min.time())
-            )
-            rand_loc = random.choice(location_list)
             
+            # 1. Analyze Original EXIF to see if it belongs to a group
+            origin_group_key = get_original_group_key(uploaded_file.getvalue())
+            
+            assigned_date = None
+            assigned_loc = None
+            
+            # 2. Check if this group already has an assignment
+            if origin_group_key and origin_group_key in st.session_state.group_cache:
+                # Reuse the group's assignment!
+                cached = st.session_state.group_cache[origin_group_key]
+                assigned_date = cached['date']
+                assigned_loc = cached['loc']
+            else:
+                # Generate NEW randoms
+                assigned_date = get_random_weekday_date(
+                    datetime.combine(start_date, datetime.min.time()),
+                    datetime.combine(end_date, datetime.min.time())
+                )
+                assigned_loc = random.choice(location_list)
+                
+                # If this file has a valid group key, save these randoms for the next file in the group
+                if origin_group_key:
+                    st.session_state.group_cache[origin_group_key] = {
+                        "date": assigned_date,
+                        "loc": assigned_loc
+                    }
+
+            # 3. Store Final Assignment
             st.session_state.assignments[file_key] = {
-                "date": rand_date,
-                "loc": rand_loc,
+                "date": assigned_date,
+                "loc": assigned_loc,
                 "service": default_service
             }
 
@@ -186,14 +262,13 @@ if uploaded_files:
         
         if data:
             with st.container():
-                st.markdown(f"#### Photo {i+1}")
                 c1, c2 = st.columns([1, 2])
-                
                 with c1:
                     st.image(uploaded_file, use_container_width=True)
                 
                 with c2:
-                    # SERVICE DROPDOWN (Specific to this photo)
+                    st.markdown(f"**Photo {i+1}**")
+                    
                     new_service = st.selectbox(
                         "Service Type", 
                         SERVICES_LIST, 
@@ -201,16 +276,13 @@ if uploaded_files:
                         key=f"svc_{file_key}"
                     )
                     
-                    # Update session state if changed
                     if new_service != data['service']:
                         st.session_state.assignments[file_key]['service'] = new_service
                         st.rerun()
 
-                    # Info display
                     st.caption(f"📍 **{data['loc']['name']}**")
-                    st.caption(f"📅 **{data['date'].strftime('%m-%d-%Y')}**")
+                    st.caption(f"📅 **{data['date'].strftime('%A, %m-%d-%Y')}**") # Added Day Name to verify No Weekends
 
-                    # Process Image
                     final_name, final_bytes = process_single_image(
                         uploaded_file.getvalue(),
                         new_service,
@@ -218,16 +290,14 @@ if uploaded_files:
                         data['date']
                     )
                     
-                    st.markdown(f"**Filename:** `{final_name}`")
+                    st.markdown(f"File: `{final_name}`")
 
-                    # DOWNLOAD BUTTON
                     st.download_button(
-                        label="⬇️ Download This Image",
+                        label="⬇️ Download Image",
                         data=final_bytes,
                         file_name=final_name,
                         mime="image/jpeg",
                         key=f"btn_{file_key}",
                         use_container_width=True
                     )
-                
                 st.divider()
